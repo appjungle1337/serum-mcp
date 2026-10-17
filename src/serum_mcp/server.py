@@ -1175,6 +1175,49 @@ def analyze_sample_file(path: str) -> str:
     return _analyze_sample_file(path)
 
 
+def _inline_schema_refs(schema: dict) -> dict:
+    """Return ``schema`` with every local ``#/$defs/...`` reference expanded
+    in place and the top-level ``$defs`` block removed.
+
+    Some MCP clients and relays forward a tool's ``inputSchema`` without its
+    ``$defs`` section, which leaves ``{"$ref": "#/$defs/PresetSpec"}`` pointing
+    at nothing and gets the tool rejected. A self-contained schema survives
+    that. PresetSpec's models are not recursive, so full expansion terminates;
+    a recursive ref is left as-is rather than expanded forever.
+    """
+    import copy
+
+    defs = schema.get("$defs", {})
+
+    def expand(node, stack):
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                name = ref.rsplit("/", 1)[-1]
+                if name in stack or name not in defs:
+                    return {k: v for k, v in node.items()}
+                merged = expand(copy.deepcopy(defs[name]), stack | {name})
+                for key, value in node.items():
+                    if key != "$ref":
+                        merged[key] = expand(value, stack)
+                return merged
+            return {k: expand(v, stack) for k, v in node.items() if k != "$defs"}
+        if isinstance(node, list):
+            return [expand(v, stack) for v in node]
+        return node
+
+    return expand(schema, frozenset())
+
+
+def _make_tool_schemas_self_contained() -> None:
+    for tool in mcp._tool_manager.list_tools():
+        if "$defs" in tool.parameters:
+            tool.parameters = _inline_schema_refs(tool.parameters)
+
+
+_make_tool_schemas_self_contained()
+
+
 def main() -> None:
     mcp.run()
 
